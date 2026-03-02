@@ -1,0 +1,89 @@
+{
+  "name": "contexthound",
+  "displayName": "ContextHound",
+  "description": "Prompt-injection scanner — inline findings, hover remediations, CI-ready",
+  "version": "0.1.0",
+  "publisher": "ContextHound",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Linters", "Other"],
+  "keywords": ["prompt injection", "llm", "ai security", "security"],
+  "icon": "images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/IulianVOStrut/contexthound-vscode"
+  },
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "contexthound.scan",
+        "title": "ContextHound: Scan Workspace"
+      },
+      {
+        "command": "contexthound.clear",
+        "title": "ContextHound: Clear Findings"
+      }
+    ],
+    "configuration": {
+      "title": "ContextHound",
+      "properties": {
+        "contexthound.scanOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Re-scan on file save"
+        },
+        "contexthound.threshold": {
+          "type": "number",
+          "default": 60,
+          "description": "Score threshold (0-100)"
+        },
+        "contexthound.failOn": {
+          "type": "string",
+          "default": "",
+          "enum": ["", "critical", "high", "medium"],
+          "description": "Fail if any finding meets or exceeds this severity"
+        },
+        "contexthound.minConfidence": {
+          "type": "string",
+          "default": "low",
+          "enum": ["low", "medium", "high"],
+          "description": "Minimum confidence level to surface findings"
+        },
+        "contexthound.excludeRules": {
+          "type": "array",
+          "default": [],
+          "items": { "type": "string" },
+          "description": "Rule IDs to skip (e.g. [\"INJ-001\", \"SKL-003\"])"
+        },
+        "contexthound.executablePath": {
+          "type": "string",
+          "default": "",
+          "description": "Override path to the hound binary (leave blank for auto-discovery)"
+        },
+        "contexthound.configPath": {
+          "type": "string",
+          "default": "",
+          "description": "Override path to .contexthoundrc.json (leave blank to use project default)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p tsconfig.json",
+    "watch": "tsc -watch -p tsconfig.json",
+    "lint": "eslint src --ext .ts",
+    "package": "npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.3.0"
+  }
+}
