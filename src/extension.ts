@@ -15,6 +15,7 @@ let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 function getConfig(): ExtensionConfig {
   const cfg = vscode.workspace.getConfiguration('contexthound');
   return {
+    scanOnSave:     cfg.get<boolean>('scanOnSave', true),
     threshold:      cfg.get<number>('threshold', 60),
     failOn:         cfg.get<string>('failOn', ''),
     minConfidence:  cfg.get<string>('minConfidence', 'low'),
@@ -100,7 +101,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // 5. Scan on save (if enabled).
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument(() => {
-      if (getConfig().scanOnSave ?? true) {
+      if (getConfig().scanOnSave) {
         triggerScan(500);
       }
     }),

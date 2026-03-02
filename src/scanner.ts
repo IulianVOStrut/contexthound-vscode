@@ -29,6 +29,7 @@ export interface ScanResult {
 }
 
 export interface ExtensionConfig {
+  scanOnSave: boolean;
   threshold: number;
   failOn: string;
   minConfidence: string;
