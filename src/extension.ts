@@ -3,11 +3,13 @@ import { runScan, ExtensionConfig } from './scanner';
 import { applyFindings } from './diagnostics';
 import { HoundHoverProvider } from './hover';
 import { HoundStatusBar } from './statusBar';
+import { HoundCodeActionProvider } from './codeActions';
 
 // ─── Globals (set during activation, consumed during deactivation) ────────────
 
 let collection: vscode.DiagnosticCollection;
 let statusBar: HoundStatusBar;
+let outputChannel: vscode.OutputChannel;
 let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -19,7 +21,6 @@ function getConfig(): ExtensionConfig {
     threshold:      cfg.get<number>('threshold', 60),
     failOn:         cfg.get<string>('failOn', ''),
     minConfidence:  cfg.get<string>('minConfidence', 'low'),
-    excludeRules:   cfg.get<string[]>('excludeRules', []),
     executablePath: cfg.get<string>('executablePath', ''),
     configPath:     cfg.get<string>('configPath', ''),
   };
@@ -41,13 +42,21 @@ async function performScan(): Promise<void> {
   statusBar.setScanningState();
 
   try {
-    const result = await runScan(root, config);
+    outputChannel.appendLine(`[${new Date().toISOString()}] Scanning ${root} …`);
+    const result = await runScan(root, config, msg => outputChannel.appendLine(msg));
+    outputChannel.appendLine(`  → score ${result.repoScore}, ${result.allFindings.length} finding(s), passed=${result.passed}`);
     applyFindings(collection, result, root);
     statusBar.update(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    outputChannel.appendLine(`  → ERROR: ${message}`);
     statusBar.setErrorState(message);
-    vscode.window.showWarningMessage(`ContextHound scan failed: ${message}`);
+    vscode.window.showWarningMessage(
+      `ContextHound scan failed: ${message}`,
+      'Open Output',
+    ).then(choice => {
+      if (choice === 'Open Output') { outputChannel.show(); }
+    });
   }
 }
 
@@ -68,25 +77,42 @@ function triggerScan(delayMs: number): void {
 // ─── Activation ──────────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext): void {
-  // 1. Diagnostic collection — one per extension, cleared on each scan.
+  // 1. Output channel for diagnostics (visible in View → Output → ContextHound).
+  outputChannel = vscode.window.createOutputChannel('ContextHound');
+  context.subscriptions.push(outputChannel);
+
+  // 2. Diagnostic collection — one per extension, cleared on each scan.
   collection = vscode.languages.createDiagnosticCollection('ContextHound');
   context.subscriptions.push(collection);
 
-  // 2. Status bar item.
+  // 3. Status bar item.
   statusBar = new HoundStatusBar();
   context.subscriptions.push({ dispose: () => statusBar.dispose() });
 
-  // 3. Hover provider — registered for all file types (ContextHound is language-agnostic).
+  // 4. Hover provider — registered for all file types (ContextHound is language-agnostic).
   const hoverProvider = vscode.languages.registerHoverProvider(
     { scheme: 'file' },
     new HoundHoverProvider(collection),
   );
   context.subscriptions.push(hoverProvider);
 
-  // 4. Commands.
+  // 4b. Code action provider — quick-fixes on ContextHound diagnostics.
+  const codeActionProvider = vscode.languages.registerCodeActionsProvider(
+    { scheme: 'file' },
+    new HoundCodeActionProvider(collection),
+    { providedCodeActionKinds: HoundCodeActionProvider.providedCodeActionKinds },
+  );
+  context.subscriptions.push(codeActionProvider);
+
+  // 5. Commands.
   context.subscriptions.push(
     vscode.commands.registerCommand('contexthound.scan', () => {
       void performScan();
+    }),
+    vscode.commands.registerCommand('contexthound.copyRemediation', (remediation: string, ruleId: string) => {
+      void vscode.env.clipboard.writeText(remediation).then(() => {
+        void vscode.window.showInformationMessage(`[${ruleId}] remediation copied to clipboard.`);
+      });
     }),
     vscode.commands.registerCommand('contexthound.clear', () => {
       if (debounceTimer !== undefined) {
@@ -94,11 +120,11 @@ export function activate(context: vscode.ExtensionContext): void {
         debounceTimer = undefined;
       }
       collection.clear();
-      statusBar.update({ score: 0, passed: true, findings: [], filesScanned: 0 });
+      statusBar.update({ repoScore: 0, scoreLabel: 'low', passed: true, allFindings: [], files: [], threshold: 60, fileThresholdBreached: false });
     }),
   );
 
-  // 5. Scan on save (if enabled).
+  // 6. Scan on save (if enabled).
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument(() => {
       if (getConfig().scanOnSave) {
@@ -107,14 +133,14 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  // 6. Re-scan when workspace folders change.
+  // 7. Re-scan when workspace folders change.
   context.subscriptions.push(
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       triggerScan(1000);
     }),
   );
 
-  // 7. Initial scan on activation (debounced to let VS Code finish opening).
+  // 8. Initial scan on activation (debounced to let VS Code finish opening).
   triggerScan(1000);
 }
 

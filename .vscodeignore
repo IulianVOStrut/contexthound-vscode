@@ -1,4 +1,5 @@
 .github/
+.vscode/
 src/
 tsconfig.json
 eslint.config.js
@@ -6,3 +7,5 @@ eslint.config.js
 node_modules/
 out/test/
 **/*.map
+*.json
+!package.json

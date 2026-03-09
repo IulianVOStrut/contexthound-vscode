@@ -29,8 +29,8 @@ export class HoundStatusBar {
 
   /** Called once a ScanResult is available. */
   update(result: ScanResult): void {
-    const score = result.score ?? 0;
-    const passed = result.passed !== false; // default true if field absent
+    const score = result.repoScore ?? 0;
+    const passed = result.passed !== false;
 
     if (passed) {
       this.item.text = `$(shield) Hound: ${score}/100 \u2713`;

@@ -55,7 +55,7 @@ export function applyFindings(
 
   const byFile = new Map<string, vscode.Diagnostic[]>();
 
-  for (const finding of result.findings) {
+  for (const finding of result.allFindings) {
     // Findings may have relative or absolute paths; normalise to absolute.
     const absPath = path.isAbsolute(finding.file)
       ? finding.file

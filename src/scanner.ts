@@ -1,6 +1,7 @@
 import { execSync, spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -21,11 +22,13 @@ export interface Finding {
 }
 
 export interface ScanResult {
-  score: number;
+  repoScore: number;
+  scoreLabel: string;
   passed: boolean;
-  findings: Finding[];
-  filesScanned: number;
-  timestamp?: string;
+  allFindings: Finding[];
+  files: { file: string; findings: Finding[]; fileScore: number }[];
+  threshold: number;
+  fileThresholdBreached: boolean;
 }
 
 export interface ExtensionConfig {
@@ -33,9 +36,23 @@ export interface ExtensionConfig {
   threshold: number;
   failOn: string;
   minConfidence: string;
-  excludeRules: string[];
   executablePath: string;
   configPath: string;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+const SCAN_TIMEOUT_MS = 60_000;
+
+/**
+ * Wrap a path in double-quotes if it contains spaces and we're on Windows
+ * with shell:true — otherwise the shell splits it into separate tokens.
+ */
+function shellQuote(p: string): string {
+  if (process.platform === 'win32' && p.includes(' ') && !p.startsWith('"')) {
+    return `"${p}"`;
+  }
+  return p;
 }
 
 // ─── Discovery ───────────────────────────────────────────────────────────────
@@ -61,68 +78,110 @@ export async function resolveHound(root: string, override?: string): Promise<str
     // not on PATH
   }
 
-  return 'npx context-hound';
+  return 'npx --yes context-hound';
 }
 
 // ─── Execution ───────────────────────────────────────────────────────────────
 
-export async function runScan(root: string, config: ExtensionConfig): Promise<ScanResult> {
+export async function runScan(
+  root: string,
+  config: ExtensionConfig,
+  log?: (msg: string) => void,
+): Promise<ScanResult> {
   const bin = await resolveHound(root, config.executablePath);
+  log?.(`  resolved binary: ${bin}`);
+
+  if (bin.startsWith('npx')) {
+    log?.('  (first run may take ~10 s to download context-hound via npx)');
+  }
+
+  // hound writes JSON to a file, not stdout — use a temp file and read it back.
+  // Include Math.random() to avoid collisions on rapid consecutive saves.
+  const tmpBase = path.join(
+    os.tmpdir(),
+    `hound-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  );
+  const tmpFile = `${tmpBase}.json`;
 
   const args: string[] = [
     'scan',
     '--format', 'json',
-    '--dir', root,
-    '--no-cache',
+    '--out', shellQuote(tmpBase),
     '--threshold', String(config.threshold),
+    '--no-cache',   // always scan fresh in the IDE
   ];
 
   if (config.failOn && config.failOn !== '') {
     args.push('--fail-on', config.failOn);
   }
   if (config.configPath && config.configPath !== '') {
-    args.push('--config', config.configPath);
-  }
-  if (config.minConfidence && config.minConfidence !== '') {
-    args.push('--min-confidence', config.minConfidence);
-  }
-  if (config.excludeRules && config.excludeRules.length > 0) {
-    args.push('--exclude-rules', config.excludeRules.join(','));
+    args.push('--config', shellQuote(config.configPath));
   }
 
-  // Split "npx context-hound" → cmd + prepended args
+  // minConfidence has no CLI flag — pass via env var instead
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  if (config.minConfidence && config.minConfidence !== '') {
+    env['HOUND_MIN_CONFIDENCE'] = config.minConfidence;
+  }
+
+  // Split "npx --yes context-hound" → cmd + prepended args
   const parts = bin.split(' ');
   const cmd = parts[0];
   const cmdArgs = [...parts.slice(1), ...args];
 
   return new Promise((resolve, reject) => {
-    let stdout = '';
     let stderr = '';
 
     const child = spawn(cmd, cmdArgs, {
       cwd: root,
+      env,
       // On Windows, shell: true is needed to resolve .cmd shims in node_modules/.bin
       shell: process.platform === 'win32',
     });
 
-    child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-    child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    // Kill the process and reject if it exceeds the timeout
+    const timer = setTimeout(() => {
+      child.kill();
+      try { fs.unlinkSync(tmpFile); } catch { /* best-effort */ }
+      reject(new Error(`hound timed out after ${SCAN_TIMEOUT_MS / 1000} s. Try setting a faster executablePath or reducing the scanned directory.`));
+    }, SCAN_TIMEOUT_MS);
+
+    child.stderr.on('data', (d: Buffer) => {
+      stderr += d.toString();
+      log?.(`  stderr: ${d.toString().trimEnd()}`);
+    });
 
     child.on('error', (err) => {
+      clearTimeout(timer);
       reject(new Error(`Failed to start hound: ${err.message}`));
     });
 
     child.on('close', (code) => {
-      // Exit codes 0 (pass) and 1 (threshold breach) both emit valid JSON.
-      // Exit code 2 = config error, 3 = fatal. Anything else is also an error.
-      if (code !== null && code > 1) {
-        reject(new Error(`hound exited with code ${code}. stderr: ${stderr.slice(0, 400)}`));
+      clearTimeout(timer);
+
+      // Exit code meanings:
+      //   0 = passed           → JSON written ✓
+      //   1 = error/bad args   → no JSON, reject
+      //   2 = threshold breach → JSON written ✓ (passed: false)
+      //   3 = failOn violation → JSON written ✓ (passed: false)
+      if (code === 1 || (code !== null && code > 3)) {
+        try { fs.unlinkSync(tmpFile); } catch { /* best-effort */ }
+        const detail = stderr.trim() || '(no output)';
+        reject(new Error(`hound exited with code ${code}.\n${detail.slice(0, 400)}`));
         return;
       }
+
       try {
-        resolve(JSON.parse(stdout) as ScanResult);
-      } catch {
-        reject(new Error(`JSON parse error (exit ${code}): ${stdout.slice(0, 200)}`));
+        const raw = fs.readFileSync(tmpFile, 'utf8');
+        try { fs.unlinkSync(tmpFile); } catch { /* best-effort */ }
+        resolve(JSON.parse(raw) as ScanResult);
+      } catch (readErr) {
+        try { fs.unlinkSync(tmpFile); } catch { /* best-effort */ }
+        const detail = stderr.trim() || '(no stderr)';
+        reject(new Error(
+          `hound ran (exit ${code}) but JSON output file not found or unreadable.\n` +
+          `Expected: ${tmpFile}\nstderr: ${detail.slice(0, 200)}`,
+        ));
       }
     });
   });
